@@ -11,7 +11,12 @@ namespace vuk {
 		for (auto& value : values) {
 			auto& node = value.node;
 			if (node->acqrel->status == Signal::Status::eHostAvailable || node->acqrel->status == Signal::Status::eSynchronizable) {
-				// nothing to do
+				if (node->deps.size() == 0) {
+					// nothing to do
+				} else {
+					node = std::make_shared<ExtNode>(Ref{ node->get_node(), value.get_head().index }, node, Access::eNone, DomainFlagBits::eDevice);
+					extnodes.push_back(node);
+				}
 			} else {
 				if (node->get_node()->splice.dst_access == Access::eNone && node->get_node()->splice.dst_domain == DomainFlagBits::eAny) {
 					value.release();
