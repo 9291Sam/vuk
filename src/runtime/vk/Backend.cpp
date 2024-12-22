@@ -648,7 +648,12 @@ namespace vuk {
 	enum class RW { eNop, eRead, eWrite };
 
 	struct Scheduler {
-		Scheduler(Allocator all, RGCImpl* impl) : allocator(all), pass_reads(impl->pass_reads), pass_nops(impl->pass_nops), scheduled_execables(impl->scheduled_execables), impl(impl) {
+		Scheduler(Allocator all, RGCImpl* impl) :
+		    allocator(all),
+		    pass_reads(impl->pass_reads),
+		    pass_nops(impl->pass_nops),
+		    scheduled_execables(impl->scheduled_execables),
+		    impl(impl) {
 			// these are the items that were determined to run
 			for (auto& i : scheduled_execables) {
 				scheduled.emplace(i.execable);
@@ -854,6 +859,8 @@ namespace vuk {
 					elems += elem_ty->size;
 				}
 				return;
+			} else if (base_ty->kind == Type::POINTER_TY) {
+				key = reinterpret_cast<ptr_base*>(value)->device_address;
 			} else { // other types just key on the voidptr
 				key = reinterpret_cast<uint64_t>(value);
 			}
@@ -893,6 +900,8 @@ namespace vuk {
 				auto& img_att = reinterpret_cast<SampledImage*>(value)->ia;
 				add_sync(current_module->types.get_builtin_image().get(), dst_use, &img_att);
 				return;
+			} else if (base_ty->kind == Type::POINTER_TY) {
+				key = reinterpret_cast<ptr_base*>(value)->device_address;
 			} else { // no other types require sync
 				return;
 			}
@@ -986,8 +995,10 @@ namespace vuk {
 			} else if (base_ty->hash_value == current_module->types.builtin_sampled_image) { // only image syncs
 				auto& img_att = reinterpret_cast<SampledImage*>(value)->ia;
 				key = reinterpret_cast<uint64_t>(img_att.image.image);
-			} else if (base_ty->kind == Type::INTEGER_TY){ // TODO: generalise
+			} else if (base_ty->kind == Type::INTEGER_TY) { // TODO: generalise
 				return *last_modify.at(0);
+			} else if (base_ty->kind == Type::POINTER_TY) {
+				key = reinterpret_cast<ptr_base*>(value)->device_address;
 			} else { // other types just key on the voidptr
 				key = reinterpret_cast<uint64_t>(value);
 			}
@@ -1195,6 +1206,10 @@ namespace vuk {
 							bound = **buf;
 						}
 						sched.done(node, host_stream, bound);
+						recorder.init_sync(node->type[0].get(), { to_use(eNone), host_stream }, sched.get_value(first(node)));
+					} else if (node->type[0]->kind == Type::POINTER_TY) {
+						auto& ptr = constant<ptr_base>(node->construct.args[0]);
+						sched.done(node, host_stream, ptr);
 						recorder.init_sync(node->type[0].get(), { to_use(eNone), host_stream }, sched.get_value(first(node)));
 					} else if (node->type[0]->hash_value == current_module->types.builtin_image) {
 						auto& attachment = *reinterpret_cast<ImageAttachment*>(node->construct.args[0].node->constant.value);
@@ -1443,10 +1458,12 @@ namespace vuk {
 						cobuf.bind_compute_pipeline(pbi);
 
 						auto& flat_bindings = pbi->reflection_info.flat_bindings;
-						for (size_t i = first_parm; i < node->call.args.size(); i++) {
-							auto& parm = node->call.args[i];
+						size_t parm_idx = first_parm;
 
-							auto binding_idx = i - first_parm;
+						for (auto i = 0; i < flat_bindings.size(); i++) {
+							auto& parm = node->call.args[parm_idx];
+
+							auto binding_idx = parm_idx - first_parm;
 							auto& [set, binding] = flat_bindings[binding_idx];
 							auto val = sched.get_value(parm);
 							switch (binding->type) {
@@ -1473,6 +1490,24 @@ namespace vuk {
 
 							opaque_rets[binding_idx] = val;
 						}
+
+						size_t pc_offset = 0;
+						if (pbi->reflection_info.push_constant_ranges.size() > 0) {
+							auto& pcr = pbi->reflection_info.push_constant_ranges[0];
+							auto base_ty = current_module->types.make_pointer_ty(current_module->types.u32());
+							for (auto j = 0; j < pcr.num_members; j++) {
+								auto& parm = node->call.args[parm_idx];
+								auto val = sched.get_value(parm);
+								auto ptr = *reinterpret_cast<ptr_base*>(val);
+								// TODO: check which args are pointers and dereference on host the once that are not
+								cobuf.push_constants(ShaderStageFlagBits::eCompute, pc_offset, ptr);
+								auto binding_idx = parm_idx - first_parm;
+								opaque_rets[binding_idx] = val;
+								parm_idx++;
+								pc_offset += sizeof(uint64_t);
+							}
+						}
+
 						cobuf.dispatch(constant<uint32_t>(node->call.args[1]), constant<uint32_t>(node->call.args[2]), constant<uint32_t>(node->call.args[3]));
 
 						if (vk_rec->rp.handle) {
@@ -1633,20 +1668,17 @@ namespace vuk {
 							}
 							StreamResourceUse src_use = { acqrel->last_use[i], src_stream };
 							recorder.init_sync(node->type[i].get(), src_use, node->splice.values[i], false);
+							// TODO: clean this up
+#ifdef VUK_DUMP_EXEC
 							if (node->type[i]->hash_value == current_module->types.builtin_buffer) {
-#ifdef VUK_DUMP_EXEC
 								fmt::print("buffer");
-#endif
 							} else if (node->type[i]->hash_value == current_module->types.builtin_image) {
-#ifdef VUK_DUMP_EXEC
 								fmt::print("image");
-#endif
 							} else if (node->type[0]->kind == Type::ARRAY_TY) {
-#ifdef VUK_DUMP_EXEC
 								fmt::print("{}[]", (*node->type[0]->array.T)->hash_value == current_module->types.builtin_buffer ? "buffer" : "image");
-#endif
+							} else if (node->type[i]->kind == Type::POINTER_TY) {
+								fmt::print("ptr");
 							}
-#ifdef VUK_DUMP_EXEC
 							if (i + 1 < node->splice.values.size()) {
 								fmt::print(", ");
 							}
@@ -1792,9 +1824,10 @@ namespace vuk {
 					// half sync
 					for (size_t i = 0; i < node->converge.diverged.size(); i++) {
 						auto& div = node->converge.diverged[i];
-						recorder.add_sync(sched.base_type(div).get(),
-						                  sched.get_dependency_info(div, div.type().get(), node->converge.write[i] ? RW::eWrite : RW::eRead, base.node->execution_info->stream),
-						                  sched.get_value(div));
+						recorder.add_sync(
+						    sched.base_type(div).get(),
+						    sched.get_dependency_info(div, div.type().get(), node->converge.write[i] ? RW::eWrite : RW::eRead, base.node->execution_info->stream),
+						    sched.get_value(div));
 					}
 
 #ifdef VUK_DUMP_EXEC

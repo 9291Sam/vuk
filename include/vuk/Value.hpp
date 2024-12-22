@@ -250,7 +250,13 @@ namespace vuk {
 			}
 		}
 	};
-
+	
+	template<class T, class...Ctrs>
+	using val_ptr = Value<ptr<T, Ctrs...>>;
+	/*
+	template<class T, class...Ctrs>
+	using val_view = Value<view<T, Ctrs...>>;
+	*/
 	inline Value<uint64_t> operator+(Value<uint64_t> a, uint64_t b) {
 		Ref ref = current_module->make_math_binary_op(Node::BinOp::ADD, a.get_head(), current_module->make_constant(b));
 		return std::move(a).transmute<uint64_t>(ref);
