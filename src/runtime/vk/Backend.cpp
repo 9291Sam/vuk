@@ -1472,9 +1472,13 @@ namespace vuk {
 								cobuf.bind_image(set, binding->binding, *reinterpret_cast<ImageAttachment*>(val));
 								break;
 							case DescriptorType::eUniformBuffer:
-							case DescriptorType::eStorageBuffer:
-								cobuf.bind_buffer(set, binding->binding, *reinterpret_cast<Buffer*>(val));
+							case DescriptorType::eStorageBuffer: {
+								auto ptr = *reinterpret_cast<ptr_base*>(val);
+								auto& ae = alloc.get_context().resolve_ptr(ptr);
+								Buffer buf{ nullptr, ae.buffer.buffer, ae.buffer.offset, ae.buffer.size };
+								cobuf.bind_buffer(set, binding->binding, buf);
 								break;
+							}
 							case DescriptorType::eSampler:
 								cobuf.bind_sampler(set, binding->binding, *reinterpret_cast<SamplerCreateInfo*>(val));
 								break;
