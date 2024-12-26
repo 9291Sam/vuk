@@ -8,6 +8,7 @@
 #include "vuk/SourceLocation.hpp"
 #include "vuk/SyncPoint.hpp"
 #include "vuk/Types.hpp"
+#include "vuk/runtime/vk/Allocation.hpp"
 #include "vuk/runtime/vk/VkSwapchain.hpp" //TODO: leaking vk
 
 #include <atomic>
@@ -31,6 +32,7 @@ namespace vuk {
 
 	struct Type {
 		enum TypeKind { MEMORY_TY = 1, INTEGER_TY, POINTER_TY, COMPOSITE_TY, ARRAY_TY, IMBUED_TY, ALIASED_TY, OPAQUE_FN_TY, SHADER_FN_TY } kind;
+		enum Tags { TAG_BUFFERLIKE_VIEW = 1, TAG_BUFFER = 2, TAG_IMAGE = 3, TAG_SWAPCHAIN = 4 };
 		size_t size = ~0ULL;
 
 		TypeDebugInfo debug_info;
@@ -147,6 +149,17 @@ namespace vuk {
 			}
 			assert(0);
 			return v;
+		}
+
+		bool is_bufferlike_view() const {
+			if (kind != COMPOSITE_TY) {
+				return false;
+			}
+			if (composite.tag == TAG_BUFFERLIKE_VIEW) {
+				return true;
+			}
+
+			return false;
 		}
 
 		// TODO: handle multiple flags
@@ -316,6 +329,7 @@ namespace vuk {
 			ACQUIRE_NEXT_IMAGE,
 			CAST,
 			MATH_BINARY,
+			GET_ALLOCATION_SIZE,
 			GARBAGE
 		} kind;
 		uint8_t flag = 0;
@@ -411,6 +425,9 @@ namespace vuk {
 				Ref b;
 				BinOp op;
 			} math_binary;
+			struct : Fixed<1> {
+				Ref ptr;
+			} get_allocation_size;
 			struct {
 				uint8_t arg_count;
 			} generic_node;
@@ -454,6 +471,8 @@ namespace vuk {
 				return "cast";
 			case GARBAGE:
 				return "garbage";
+			case GET_ALLOCATION_SIZE:
+				return "get_allocation_size";
 			}
 			assert(0);
 			return "";
@@ -1122,9 +1141,21 @@ namespace vuk {
 			}
 
 			std::shared_ptr<Type> make_pointer_ty(std::shared_ptr<Type> ty) {
-				auto t = new Type{ .kind = Type::POINTER_TY, .size = sizeof(uint64_t), .pointer = { } };
+				auto t = new Type{ .kind = Type::POINTER_TY, .size = sizeof(uint64_t), .pointer = {} };
 				t->pointer.T = &t->child_types.emplace_back(ty);
 				return emplace_type(std::shared_ptr<Type>(t));
+			}
+
+			std::shared_ptr<Type> make_bufferlike_view_ty(std::shared_ptr<Type> ty) {
+				auto buffer_ = std::vector<std::shared_ptr<Type>>{ make_pointer_ty(ty), u64() };
+				auto buffer_offsets = std::vector<size_t>{ sizeof(uint64_t) };
+				auto buffer_type = emplace_type(std::shared_ptr<Type>(new Type{ .kind = Type::COMPOSITE_TY,
+				                                                                .size = sizeof(view<BufferLike<void>>),
+				                                                                .debug_info = allocate_type_debug_info("view<b>"),
+				                                                                .offsets = buffer_offsets,
+				                                                                .composite = { .types = buffer_, .tag = Type::TAG_BUFFERLIKE_VIEW } }));
+				buffer_type->child_types = std::move(buffer_);
+				return buffer_type;
 			}
 
 			std::shared_ptr<Type> make_opaque_fn_ty(std::span<std::shared_ptr<Type> const> args,
@@ -1229,7 +1260,7 @@ namespace vuk {
 				                                                               .size = sizeof(ImageAttachment),
 				                                                               .debug_info = allocate_type_debug_info("image"),
 				                                                               .offsets = image_offsets,
-				                                                               .composite = { .types = image_, .tag = 0 } }));
+				                                                               .composite = { .types = image_, .tag = Type::TAG_IMAGE } }));
 				image_type->child_types = std::move(image_);
 				builtin_image = Type::hash(image_type.get());
 
@@ -1252,7 +1283,7 @@ namespace vuk {
 				                                                                .size = sizeof(Buffer),
 				                                                                .debug_info = allocate_type_debug_info("buffer"),
 				                                                                .offsets = buffer_offsets,
-				                                                                .composite = { .types = buffer_, .tag = 1 } }));
+				                                                                .composite = { .types = buffer_, .tag = Type::TAG_BUFFER } }));
 				buffer_type->child_types = std::move(buffer_);
 
 				builtin_buffer = Type::hash(buffer_type.get());
@@ -1276,7 +1307,7 @@ namespace vuk {
 				                                                                   .size = sizeof(Swapchain*),
 				                                                                   .debug_info = allocate_type_debug_info("swapchain"),
 				                                                                   .offsets = offsets,
-				                                                                   .composite = { .types = swp_, .tag = 2 } }));
+				                                                                   .composite = { .types = swp_, .tag = Type::TAG_SWAPCHAIN } }));
 				builtin_swapchain = Type::hash(swapchain_type.get());
 				return swapchain_type;
 			}
@@ -1624,6 +1655,15 @@ namespace vuk {
 			                              .construct = { .args = std::span(args_ptr, 3) } }));
 		}
 
+		Ref make_construct(std::shared_ptr<Type> type, std::span<Ref> args) {
+			auto ty = new std::shared_ptr<Type>[1]{ type };
+			auto args_ptr = new Ref[args.size() + 1];
+			auto mem_ty = new std::shared_ptr<Type>[1]{ types.memory(0) };
+			args_ptr[0] = first(emplace_op(Node{ .kind = Node::CONSTANT, .type = std::span{ mem_ty, 1 }, .constant = { .value = nullptr } }));
+			std::copy(args.begin(), args.end(), args_ptr + 1);
+			return first(emplace_op(Node{ .kind = Node::CONSTRUCT, .type = std::span{ ty, 1 }, .construct = { .args = std::span(args_ptr, args.size() + 1) } }));
+		}
+
 		Ref make_extract(Ref composite, Ref index) {
 			auto stripped = Type::stripped(composite.type());
 			assert(stripped->kind == Type::ARRAY_TY);
@@ -1641,6 +1681,13 @@ namespace vuk {
 			}
 			return first(emplace_op(
 			    Node{ .kind = Node::EXTRACT, .type = std::span{ ty, 1 }, .extract = { .composite = composite, .index = make_constant<uint64_t>(index) } }));
+		}
+
+		Ref make_get_allocation_size(Ref ptr) {
+			auto ty = new std::shared_ptr<Type>[1]{ types.u64() };
+			return first(emplace_op(Node{ .kind = Node::GET_ALLOCATION_SIZE,
+			                              .type = std::span{ ty, 1 },
+			                              .get_allocation_size = { .ptr = ptr } }));
 		}
 
 		Ref make_slice(Ref image, Ref base_level, Ref level_count, Ref base_layer, Ref layer_count) {

@@ -1314,6 +1314,23 @@ namespace vuk {
 						}
 						node->construct.args[0].node->constant.value = arr_mem;
 						sched.done(node, host_stream, (void*)arr_mem);
+					} else if (node->type[0]->is_bufferlike_view()) {
+						for (size_t i = 1; i < node->construct.args.size(); i++) {
+							auto arg_ty = node->construct.args[i].type();
+							auto& parm = node->construct.args[i];
+
+							recorder.add_sync(sched.base_type(parm).get(), sched.get_dependency_info(parm, arg_ty.get(), RW::eWrite, nullptr), sched.get_value(parm));
+						}
+						auto p = sched.get_value<ptr<>>(node->construct.args[1]);
+						auto s = sched.get_value<size_t>(node->construct.args[2]);
+#ifdef VUK_DUMP_EXEC
+						print_results(node);
+						fmt::print(" = construct<view<b>> ");
+						print_args(node->construct.args.subspan(1));
+						fmt::print("\n");
+#endif
+						sched.done(node, host_stream, view<BufferLike<void>>{ p, s });
+						recorder.init_sync(node->type[0].get(), { to_use(eNone), host_stream }, sched.get_value(first(node)));
 					} else if (node->type[0]->hash_value == current_module->types.builtin_sampled_image) {
 						for (size_t i = 1; i < node->construct.args.size(); i++) {
 							auto arg_ty = node->construct.args[i].type();
@@ -1468,9 +1485,9 @@ namespace vuk {
 								break;
 							case DescriptorType::eUniformBuffer:
 							case DescriptorType::eStorageBuffer: {
-								auto ptr = *reinterpret_cast<ptr_base*>(val);
-								auto& ae = alloc.get_context().resolve_ptr(ptr);
-								Buffer buf{ nullptr, ae.buffer.buffer, ae.buffer.offset, ae.buffer.size };
+								auto& v = *reinterpret_cast<view<BufferLike<void>>*>(val);
+								auto& ae = alloc.get_context().resolve_ptr(v.data());
+								Buffer buf{ nullptr, ae.buffer.buffer, ae.buffer.offset, v.size() };
 								cobuf.bind_buffer(set, binding->binding, buf);
 								break;
 							}
@@ -1843,6 +1860,22 @@ namespace vuk {
 					for (size_t i = 0; i < node->converge.diverged.size(); i++) {
 						sched.schedule_dependency(node->converge.diverged[i], node->converge.write[i] ? RW::eWrite : RW::eRead);
 					}
+				}
+				break;
+			}
+			case Node::GET_ALLOCATION_SIZE: {
+				if (sched.process(item)) {
+#ifdef VUK_DUMP_EXEC
+					print_results(node);
+					fmt::print(" = get_allocation_size ");
+					print_args({ &node->get_allocation_size.ptr, 1 });
+					fmt::print("\n");
+#endif
+					auto ptr = sched.get_value<ptr_base>(node->get_allocation_size.ptr);
+					auto size = alloc.get_context().resolve_ptr(ptr).buffer.size;
+					sched.done(node, item.scheduled_stream, size); // converge doesn't execute
+				} else {
+					sched.schedule_dependency(node->get_allocation_size.ptr, RW::eRead);
 				}
 				break;
 			}

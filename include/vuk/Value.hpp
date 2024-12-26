@@ -39,6 +39,7 @@ namespace vuk {
 		Result<void> wait(Allocator& allocator, Compiler& compiler, RenderGraphCompileOptions options = {});
 
 		std::shared_ptr<ExtNode> node;
+
 	protected:
 		size_t index;
 	};
@@ -183,10 +184,10 @@ namespace vuk {
 		  requires std::is_same_v<T, ImageAttachment>
 		{
 			Ref item = current_module->make_slice(get_head(),
-			                                     current_module->make_constant(mip),
-			                                     current_module->make_constant(1u),
-			                                     current_module->make_constant(0u),
-			                                     current_module->make_constant(VK_REMAINING_ARRAY_LAYERS));
+			                                      current_module->make_constant(mip),
+			                                      current_module->make_constant(1u),
+			                                      current_module->make_constant(0u),
+			                                      current_module->make_constant(VK_REMAINING_ARRAY_LAYERS));
 			return Value(ExtRef(std::make_shared<ExtNode>(item, node), item));
 		}
 
@@ -194,10 +195,10 @@ namespace vuk {
 		  requires std::is_same_v<T, ImageAttachment>
 		{
 			Ref item = current_module->make_slice(get_head(),
-			                                     current_module->make_constant(0u),
-			                                     current_module->make_constant(VK_REMAINING_MIP_LEVELS),
-			                                     current_module->make_constant(layer),
-			                                     current_module->make_constant(1u));
+			                                      current_module->make_constant(0u),
+			                                      current_module->make_constant(VK_REMAINING_MIP_LEVELS),
+			                                      current_module->make_constant(layer),
+			                                      current_module->make_constant(1u));
 			return Value(ExtRef(std::make_shared<ExtNode>(item, node), item));
 		}
 
@@ -224,7 +225,7 @@ namespace vuk {
 			candidate_node.extract.composite = composite; // writing these out for clang workaround
 			candidate_node.extract.index = first(&constant_node);
 			current_module->garbage.push_back(def.node->construct.args[index + 1].node);
-			auto res = [&]() -> Result<void>{
+			auto res = [&]() -> Result<void> {
 				if (ty->kind == Type::INTEGER_TY && ty->integer.width == 64) {
 					auto result_ = eval<uint64_t>(first(&candidate_node));
 					if (!result_) {
@@ -244,19 +245,27 @@ namespace vuk {
 				}
 				return { expected_value };
 			}();
-			if(!res) {
+			if (!res) {
 				(void)res.error();
 				def.node->construct.args[index + 1] = current_module->make_extract(composite, index);
 			}
 		}
+
+		Value<view<T>> implicit_view()
+		  requires std::is_base_of_v<ptr_base, T>
+		{
+			std::array args = { get_head(), current_module->make_get_allocation_size(get_head()) };
+			auto imp_view = current_module->make_construct(current_module->types.make_bufferlike_view_ty(current_module->types.u32()), args);
+			return { make_ext_ref(imp_view) };
+		}
 	};
-	
-	template<class T, class...Ctrs>
+
+	template<class T, class... Ctrs>
 	using val_ptr = Value<ptr<T, Ctrs...>>;
-	/*
-	template<class T, class...Ctrs>
+
+	template<class T, class... Ctrs>
 	using val_view = Value<view<T, Ctrs...>>;
-	*/
+
 	inline Value<uint64_t> operator+(Value<uint64_t> a, uint64_t b) {
 		Ref ref = current_module->make_math_binary_op(Node::BinOp::ADD, a.get_head(), current_module->make_constant(b));
 		return std::move(a).transmute<uint64_t>(ref);

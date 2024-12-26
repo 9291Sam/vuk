@@ -619,6 +619,11 @@ namespace vuk {
 			first(node).link().def = first(node);
 			break;
 
+		case Node::GET_ALLOCATION_SIZE:
+			add_read(node, node->get_allocation_size.ptr, 0);
+			add_breaking_result(node, 0);
+			break;
+
 		case Node::GARBAGE:
 			break;
 
