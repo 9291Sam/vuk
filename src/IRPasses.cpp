@@ -401,13 +401,13 @@ namespace vuk {
 		};
 
 		auto add_write = [&](Node* node, Ref& parm, size_t index, Subrange::Image requested = {}) -> void {
-			assert(parm.node->kind != Node::GARBAGE);
+			VUK_ICE(parm.node->kind != Node::GARBAGE);
 			bool see_through_splice = parm.node->kind == Node::SPLICE && parm.node->splice.dst_access == Access::eNone &&
 			                          parm.node->splice.dst_domain == DomainFlagBits::eAny &&
 			                          (!parm.node->splice.rel_acq || parm.node->splice.rel_acq->status == Signal::Status::eDisarmed);
 			auto& st_parm = see_through_splice ? parm.node->splice.src[parm.index] : parm;
 			if (!st_parm.node->links) {
-				assert(do_ssa);
+				VUK_ICE(do_ssa);
 				// external node -> init
 				allocate_node_links(st_parm.node, allocator);
 				for (size_t i = 0; i < st_parm.node->type.size(); i++) {
@@ -416,9 +416,9 @@ namespace vuk {
 			}
 			auto link = &st_parm.link();
 			if (link->undef.node != nullptr) { // there is already a write -> do SSA rewrite
-				assert(do_ssa);
-				auto old_ref = link->undef;                 // this is an rref
-				assert(node->index >= old_ref.node->index); // we are after the existing write
+				VUK_ICE(do_ssa);
+				auto old_ref = link->undef;                  // this is an rref
+				VUK_ICE(node->index >= old_ref.node->index); // we are after the existing write
 
 				// attempt to find the final revision of this
 				// this could be either the last write on the main chain, or the last write on a child chain
@@ -430,13 +430,13 @@ namespace vuk {
 		};
 
 		auto add_read = [&](Node* node, Ref& parm, size_t index) {
-			assert(parm.node->kind != Node::GARBAGE);
+			VUK_ICE(parm.node->kind != Node::GARBAGE);
 			bool see_through_splice = parm.node->kind == Node::SPLICE && parm.node->splice.dst_access == Access::eNone &&
 			                          parm.node->splice.dst_domain == DomainFlagBits::eAny &&
 			                          (!parm.node->splice.rel_acq || parm.node->splice.rel_acq->status == Signal::Status::eDisarmed);
 			auto& st_parm = see_through_splice ? parm.node->splice.src[parm.index] : parm;
 			if (!st_parm.node->links) {
-				assert(do_ssa);
+				VUK_ICE(do_ssa);
 				// external node -> init
 				allocate_node_links(st_parm.node, allocator);
 				for (size_t i = 0; i < st_parm.node->type.size(); i++) {
@@ -445,7 +445,7 @@ namespace vuk {
 			}
 			auto link = &st_parm.link();
 			if (link->undef.node != nullptr && node->index > link->undef.node->index) { // there is already a write and it is earlier than us
-				assert(do_ssa);
+				VUK_ICE(do_ssa);
 				auto last_write = walk_writes(see_through_splice ? parm.node->splice.src[parm.index] : parm, {});
 				parm = last_write;
 				link = &parm.link();
@@ -457,20 +457,27 @@ namespace vuk {
 		case Node::CONSTANT:
 		case Node::PLACEHOLDER:
 			break;
+		/*
+		CONSTRUCT makes composites and arrays
+		this is normally a read on paramters, but
+		if a parameter would alias the result, i.e. you make a view from a ptr, then it must be upgraded to write
+		*/
 		case Node::CONSTRUCT:
 			first(node).link().def = first(node);
 
 			for (size_t i = 0; i < node->construct.args.size(); i++) {
 				auto& parm = node->construct.args[i];
-				if (node->type[0]->kind == Type::ARRAY_TY) {
+				if (node->type[0]->kind == Type::ARRAY_TY || parm.type()->kind == Type::POINTER_TY) { // TODO: ptr takeover
 					add_write(node, parm, i);
 				} else {
 					add_read(node, parm, i);
 				}
 			}
 
-			if (node->type[0]->kind == Type::ARRAY_TY || node->type[0]->hash_value == current_module->types.builtin_sampled_image) {
-				for (size_t i = 1; i < node->construct.args.size(); i++) {
+			for (size_t i = 1; i < node->construct.args.size(); i++) {
+				auto& parm = node->construct.args[i];
+				if (node->type[0]->kind == Type::ARRAY_TY || node->type[0]->hash_value == current_module->types.builtin_sampled_image ||
+				    parm.type()->kind == Type::POINTER_TY) {
 					auto& parm = node->construct.args[i];
 					bool see_through_splice = parm.node->kind == Node::SPLICE && parm.node->splice.dst_access == Access::eNone &&
 					                          parm.node->splice.dst_domain == DomainFlagBits::eAny &&
