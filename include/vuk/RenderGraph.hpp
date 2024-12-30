@@ -490,10 +490,6 @@ public:
 		};
 	}
 
-	inline ExtRef make_ext_ref(Ref ref, std::vector<std::shared_ptr<ExtNode>> deps = {}) {
-		return ExtRef(std::make_shared<ExtNode>(ref.node, std::move(deps)), ref);
-	}
-
 	[[nodiscard]] inline Value<ImageAttachment> declare_ia(Name name, ImageAttachment ia = {}, VUK_CALLSTACK) {
 		Ref ref = current_module->make_declare_image(ia);
 		current_module->name_output(ref, name.c_str());
