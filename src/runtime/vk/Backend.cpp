@@ -1760,17 +1760,20 @@ namespace vuk {
 			case Node::EXTRACT: {
 				if (sched.process(item)) {
 					// no sync - currently no extract composite needs sync
-					/* recorder.add_sync(sched.base_type(node->extract.composite),
-					                  sched.get_dependency_info(node->extract.composite, node->extract.composite.type(), RW::eWrite, nullptr),
-					                  sched.get_value(node->extract.composite));*/
 #ifdef VUK_DUMP_EXEC
 					print_results(node);
 					fmt::print(" = ");
 					print_args(std::span{ &node->extract.composite, 1 });
-					fmt::print("[{}]", constant<uint64_t>(node->extract.index));
+					auto sty = Type::stripped(node->extract.composite.type());
+					if (sty->kind == Type::ARRAY_TY) {
+						fmt::print("[{}]", constant<uint64_t>(node->extract.index));
+					} else {
+						assert(sty->kind == Type::COMPOSITE_TY);
+						fmt::print(".{}", sty->member_names[constant<uint64_t>(node->extract.index)]);
+					}
 					fmt::print("\n");
 #endif
-					sched.done(node, item.scheduled_stream, sched.get_value(first(node))); // extract doesn't execute
+					sched.done(node, item.scheduled_stream, sched.get_value(first(node)));
 				} else {
 					sched.schedule_new(node->extract.composite.node);
 					sched.schedule_dependency(node->extract.index, RW::eRead);
