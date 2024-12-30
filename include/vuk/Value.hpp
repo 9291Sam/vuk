@@ -237,14 +237,14 @@ namespace vuk {
 			candidate_node.extract.index = first(&constant_node);
 			current_module->garbage.push_back(def.node->construct.args[index + 1].node);
 			auto res = [&]() -> Result<void> {
-				if (ty->kind == Type::INTEGER_TY && ty->integer.width == 64) {
+				if (ty->kind == Type::INTEGER_TY && ty->scalar.width == 64) {
 					auto result_ = eval<uint64_t>(first(&candidate_node));
 					if (!result_) {
 						return result_;
 					}
 					auto result = *result_;
 					def.node->construct.args[index + 1] = current_module->template make_constant<uint64_t>(result);
-				} else if (ty->kind == Type::INTEGER_TY && ty->integer.width == 32) {
+				} else if (ty->kind == Type::INTEGER_TY && ty->scalar.width == 32) {
 					auto result_ = eval<uint32_t>(first(&candidate_node));
 					if (!result_) {
 						return result_;
@@ -262,15 +262,27 @@ namespace vuk {
 			}
 		}
 
-		Value<view<T>> implicit_view()
+		auto implicit_view()
 		  requires std::is_base_of_v<ptr_base, T>
 		{
+			using inner_T = T::pointed_T;
 			std::array args = { get_head(), current_module->make_get_allocation_size(get_head()) };
-			auto imp_view = current_module->make_construct(current_module->types.make_bufferlike_view_ty(current_module->types.u32()), args);
-			auto vval = Value<view<T>>{ make_ext_ref(imp_view, { node }) };
+			auto imp_view = current_module->make_construct(to_IR_type<view<inner_T>>(), nullptr, args);
+			auto vval = Value<view<inner_T>>{ make_ext_ref(imp_view, { node }) };
 			node->deps.push_back(vval.node);
 			return std::move(vval);
 		}
+
+		Value<BufferCreateInfo> def()
+		  requires std::is_base_of_v<ptr_base, T>
+		{
+			auto def_or_v = get_def(get_head());
+			assert(def_or_v && def_or_v->is_ref);
+			auto def = def_or_v->ref;
+
+			return { make_ext_ref({ def.node->allocate.src }) };
+		}
+
 	};
 
 	template<class T = void, class... Ctrs>

@@ -365,7 +365,7 @@ namespace vuk {
 			} while (link->next || link->child_chains.size() > 0);
 
 			if (!last_write.node) {
-				assert(!link->undef);
+				VUK_ICE(!link->undef);
 				last_write = link->def;
 			}
 
@@ -386,7 +386,7 @@ namespace vuk {
 			                          (!parm.node->splice.rel_acq || parm.node->splice.rel_acq->status == Signal::Status::eDisarmed);
 			auto& st_parm = see_through_splice ? parm.node->splice.src[parm.index] : parm;
 			if (!st_parm.node->links) {
-				assert(do_ssa);
+				VUK_ICE(do_ssa);
 				return;
 			}
 
@@ -394,7 +394,7 @@ namespace vuk {
 			auto& prev = out.link().prev;
 			if (!do_ssa) {
 				VUK_ICE(!link->next);
-				assert(!prev);
+				VUK_ICE(!prev);
 			}
 			link->next = &out.link();
 			prev = link;
@@ -423,13 +423,33 @@ namespace vuk {
 				// attempt to find the final revision of this
 				// this could be either the last write on the main chain, or the last write on a child chain
 				auto last_write = walk_writes(see_through_splice ? parm.node->splice.src[parm.index] : parm, requested);
+				// 
+				if (last_write.type() != parm.type()) {
+					auto lr_ty = Type::stripped(last_write.type());
+					VUK_ICE(lr_ty->kind == Type::COMPOSITE_TY);
+					auto def = get_def2(last_write);
+					VUK_ICE(def);
+					auto llink = &parm.link();
+					while (llink->undef.node != def->node)
+						llink = llink->next;
+					auto arg_idx = llink->undef.index;
+					auto extract = module->make_extract(last_write, arg_idx - 1);
+					allocate_node_links(extract.node, allocator);
+					last_write.link().undef = extract;
+					last_write.link().next = &extract.link();
+					extract.link().prev = &last_write.link();
+					extract.link().def = extract;
+					new_nodes.push_back(extract.node);
+					last_write = extract;
+					printf("");
+				}
 				parm = last_write;
 				link = &parm.link();
 			}
 			link->undef = { node, index };
 		};
 
-		auto add_read = [&](Node* node, Ref& parm, size_t index) {
+		auto add_read = [&](Node* node, Ref& parm, size_t index, bool as_nop = false) {
 			VUK_ICE(parm.node->kind != Node::GARBAGE);
 			bool see_through_splice = parm.node->kind == Node::SPLICE && parm.node->splice.dst_access == Access::eNone &&
 			                          parm.node->splice.dst_domain == DomainFlagBits::eAny &&
@@ -450,7 +470,11 @@ namespace vuk {
 				parm = last_write;
 				link = &parm.link();
 			}
-			link->reads.append(pass_reads, { node, index });
+			if (as_nop) {
+				link->nops.append(pass_nops, { node, index });
+			} else {
+				link->reads.append(pass_reads, { node, index });
+			}
 		};
 
 		switch (node->kind) {
@@ -477,13 +501,13 @@ namespace vuk {
 			for (size_t i = 1; i < node->construct.args.size(); i++) {
 				auto& parm = node->construct.args[i];
 				if (node->type[0]->kind == Type::ARRAY_TY || node->type[0]->hash_value == current_module->types.builtin_sampled_image ||
-				    parm.type()->kind == Type::POINTER_TY) {
+				    parm.type()->kind == Type::POINTER_TY || parm.type()->is_bufferlike_view()) {
 					auto& parm = node->construct.args[i];
 					bool see_through_splice = parm.node->kind == Node::SPLICE && parm.node->splice.dst_access == Access::eNone &&
 					                          parm.node->splice.dst_domain == DomainFlagBits::eAny &&
 					                          (!parm.node->splice.rel_acq || parm.node->splice.rel_acq->status == Signal::Status::eDisarmed);
 					auto& st_parm = see_through_splice ? parm.node->splice.src[parm.index] : parm;
-					st_parm.link().next = &first(node).link();
+					parm.link().next = &first(node).link();
 				}
 			}
 
@@ -623,12 +647,17 @@ namespace vuk {
 			break;
 
 		case Node::ACQUIRE_NEXT_IMAGE:
-			first(node).link().def = first(node);
+			add_breaking_result(node, 0);
 			break;
 
 		case Node::GET_ALLOCATION_SIZE:
-			add_read(node, node->get_allocation_size.ptr, 0);
+			add_read(node, node->get_allocation_size.ptr, 0, true);
 			add_breaking_result(node, 0);
+			break;
+
+		case Node::ALLOCATE:
+			add_read(node, node->allocate.src, 0);
+			add_result(node, 0, node->allocate.src);
 			break;
 
 		case Node::GARBAGE:
@@ -724,7 +753,7 @@ namespace vuk {
 			}
 		};
 
-		auto placeholder_to_ptr = []<class T>(Ref r, T* ptr) {
+		auto placeholder_to_ptr = [](Ref r, void* ptr) {
 			if (r.node->kind == Node::PLACEHOLDER) {
 				r.node->kind = Node::CONSTANT;
 				r.node->constant.value = ptr;
@@ -732,12 +761,13 @@ namespace vuk {
 			}
 		};
 
-		// valloc reification - if there were later setting of fields, then remove placeholders
+		// construct reification - if there were later setting of fields, then remove placeholders
 		for (auto node : nodes) {
 			switch (node->kind) {
 			case Node::CONSTRUCT: {
 				auto args_ptr = node->construct.args.data();
-				if (node->type[0]->hash_value == current_module->types.builtin_image) {
+				auto ty = node->type[0];
+				if (ty->hash_value == current_module->types.builtin_image) {
 					auto ptr = &constant<ImageAttachment>(args_ptr[0]);
 					auto& value = constant<ImageAttachment>(args_ptr[0]);
 					if (value.extent.width > 0) {
@@ -767,13 +797,19 @@ namespace vuk {
 					if (value.level_count != VK_REMAINING_MIP_LEVELS) {
 						placeholder_to_ptr(args_ptr[9], &ptr->level_count);
 					}
-				} else if (node->type[0]->hash_value == current_module->types.builtin_buffer) {
-					auto ptr = &constant<Buffer>(args_ptr[0]);
-					auto& value = constant<Buffer>(args_ptr[0]);
-					if (value.size != ~(0u)) {
-						placeholder_to_ptr(args_ptr[1], &ptr->size);
+				} else if (ty->kind == Type::COMPOSITE_TY) {
+					auto* base = constant(args_ptr[0]);
+					if (!base) { // if there was no value provided here, then we don't perform any reification
+						break;
+					}
+					for (size_t i = 1; i < node->construct.args.size(); i++) {
+						bool is_default = ty->composite.is_default(base, i - 1);
+						if (!is_default) {
+							placeholder_to_ptr(args_ptr[i], ty->composite.get(base, i - 1));
+						}
 					}
 				}
+
 			} break;
 			default:
 				break;
@@ -1144,10 +1180,8 @@ namespace vuk {
 	Result<void> Compiler::validate_read_undefined() {
 		for (auto node : impl->nodes) {
 			switch (node->kind) {
-			case Node::CONSTRUCT: { // CONSTRUCT discards -
-				// TODO: arrays!
-				if (node->type[0]->kind != Type::ARRAY_TY && node->links->reads.size() > 0 &&
-				    node->type[0]->hash_value != current_module->types.builtin_sampled_image) { // we are trying to read from it :(
+			case Node::ALLOCATE: { // ALLOCATE discards
+				if (node->links->reads.size() > 0) { // we are trying to read from it :(
 					auto reads = node->links->reads.to_span(impl->pass_reads);
 					for (auto offender : reads) {
 						if (offender.node->kind == Node::SPLICE) { // TODO: not actually a read

@@ -17,7 +17,7 @@
 #include <unordered_set>
 #include <vector>
 
-// #define VUK_DUMP_EXEC
+#define VUK_DUMP_EXEC
 // #define VUK_DEBUG_IMBAR
 // #define VUK_DEBUG_MEMBAR
 
@@ -53,7 +53,7 @@ namespace vuk {
 		} else if (parm.node->kind == Node::CONSTANT) {
 			Type* ty = parm.node->type[0].get();
 			if (ty->kind == Type::INTEGER_TY) {
-				switch (ty->integer.width) {
+				switch (ty->scalar.width) {
 				case 32:
 					return fmt::format("{}", constant<uint32_t>(parm));
 				case 64:
@@ -844,10 +844,6 @@ namespace vuk {
 			if (base_ty->hash_value == current_module->types.builtin_image) {
 				auto& img_att = *reinterpret_cast<ImageAttachment*>(value);
 				key = reinterpret_cast<uint64_t>(img_att.image.image);
-			} else if (base_ty->hash_value == current_module->types.builtin_buffer) {
-				auto buf = reinterpret_cast<Buffer*>(value);
-				key = reinterpret_cast<uint64_t>(buf->allocation);
-				hash_combine(key, buf->offset);
 			} else if (base_ty->kind == Type::ARRAY_TY) {
 				if (base_ty->array.count > 0) { // for an array, we key off the the first element, as the array syncs together
 					auto elem_ty = base_ty->array.T->get();
@@ -856,19 +852,14 @@ namespace vuk {
 				} else { // zero-len arrays
 					return 0;
 				}
-			} else if (base_ty->hash_value == current_module->types.builtin_sampled_image) { // only image syncs
-				auto& img_att = reinterpret_cast<SampledImage*>(value)->ia;
-				key = reinterpret_cast<uint64_t>(img_att.image.image);
-			} else if (base_ty->kind == Type::INTEGER_TY) { // TODO: generalise
-				return 0;
 			} else if (base_ty->kind == Type::POINTER_TY) {
-				key = reinterpret_cast<ptr_base*>(value)->device_address;
+				return 0; // pointers cannot be synchronized
 			} else if (base_ty->is_bufferlike_view()) {
 				auto& v = *reinterpret_cast<view<BufferLike<void>>*>(value);
 				key = v.ptr.device_address;
-				hash_combine(key, v.count);
-			} else { // other types just key on the voidptr
-				key = reinterpret_cast<uint64_t>(value);
+				hash_combine(key, v.sz_bytes); // TODO: aliasing
+			} else {                      // other types do not sync
+				return 0;
 			}
 			return key;
 		}
@@ -887,9 +878,20 @@ namespace vuk {
 					elems += elem_ty->size;
 				}
 				return;
+			} else if (base_ty->kind == Type::COMPOSITE_TY) { // do each member for a composite
+				if (!base_ty->is_bufferlike_view()) {           // if the type is a view, we will sync it, otherwise sync each elem
+					for (size_t i = 0; i < base_ty->composite.types.size(); i++) {
+						init_sync(base_ty->composite.types[i].get(), src_use, base_ty->composite.get(value, i), enforce_unique);
+					}
+					return;
+				}
 			}
 
 			uint64_t key = value_identity(base_ty, value);
+
+			if (key == 0) {
+				return;
+			}
 
 			if (enforce_unique) {
 				assert(last_modify.find(key) == last_modify.end());
@@ -1131,7 +1133,7 @@ namespace vuk {
 					};
 					switch (node->type[0]->kind) {
 					case Type::INTEGER_TY: {
-						switch (node->type[0]->integer.width) {
+						switch (node->type[0]->scalar.width) {
 						case 32:
 							sched.done(node, host_stream, do_op(uint32_t{}, node));
 							break;
@@ -1163,50 +1165,11 @@ namespace vuk {
 	}                                                                                                                                                            \
 	dst = *reinterpret_cast<decltype(dst)*>(UNIQUE_NAME(A)->value);                                                                                              \
 	if (UNIQUE_NAME(A)->owned) {                                                                                                                                 \
-		delete[] UNIQUE_NAME(A)->value;                                                                                                                            \
+		delete[] reinterpret_cast<char*>(UNIQUE_NAME(A)->value);                                                                                                   \
 	}
 			case Node::CONSTRUCT: { // when encountering a CONSTRUCT, allocate the thing if needed
 				if (sched.process(item)) {
-					if (node->type[0]->hash_value == current_module->types.builtin_buffer) {
-						auto& bound = constant<Buffer>(node->construct.args[0]);
-						auto res = [&]() -> Result<void, CannotBeConstantEvaluated> {
-							EVAL(bound.size, node->construct.args[1]);
-							return { expected_value };
-						}();
-						if (!res) {
-							if (res.error().ref.node->kind == Node::PLACEHOLDER) {
-								return { expected_error,
-									       RenderGraphException(format_message(Level::eError, node, node->construct.args.subspan(1), "': argument(s) not set or inferrable\n")) };
-							} else {
-								return { expected_error,
-									       RenderGraphException(
-									           format_message(Level::eError, node, node->construct.args.subspan(1), "': argument(s) not constant evaluatable\n")) };
-							}
-						}
-#ifdef VUK_DUMP_EXEC
-						print_results(node);
-						fmt::print(" = construct<buffer> ");
-						print_args(node->construct.args.subspan(1));
-						fmt::print("\n");
-#endif
-						if (bound.buffer == VK_NULL_HANDLE) {
-							assert(bound.size != ~(0u));
-							assert(bound.memory_usage != (MemoryUsage)0);
-							BufferCreateInfo bci{ .mem_usage = bound.memory_usage, .size = bound.size, .alignment = 1 }; // TODO: alignment?
-							auto allocator = node->construct.allocator ? *node->construct.allocator : alloc;
-							auto buf = allocate_buffer(allocator, bci);
-							if (!buf) {
-								return buf;
-							}
-							bound = **buf;
-						}
-						sched.done(node, host_stream, bound);
-						recorder.init_sync(node->type[0].get(), { to_use(eNone), host_stream }, sched.get_value(first(node)));
-					} else if (node->type[0]->kind == Type::POINTER_TY) {
-						auto& ptr = constant<ptr_base>(node->construct.args[0]);
-						sched.done(node, host_stream, ptr);
-						recorder.init_sync(node->type[0].get(), { to_use(eNone), host_stream }, sched.get_value(first(node)));
-					} else if (node->type[0]->hash_value == current_module->types.builtin_image) {
+					if (node->type[0]->hash_value == current_module->types.builtin_image) {
 						auto& attachment = *reinterpret_cast<ImageAttachment*>(node->construct.args[0].node->constant.value);
 						// collapse inferencing
 						auto res = [&]() -> Result<void, CannotBeConstantEvaluated> {
@@ -1262,7 +1225,7 @@ namespace vuk {
 						fmt::print("\n");
 #endif
 						if (!attachment.image) {
-							auto allocator = node->construct.allocator ? *node->construct.allocator : alloc;
+							auto allocator = alloc;
 							attachment.usage |= impl->compute_usage(&first(node).link());
 							assert(attachment.usage != ImageUsageFlags{});
 							auto img = allocate_image(allocator, attachment);
@@ -1314,49 +1277,101 @@ namespace vuk {
 						}
 						node->construct.args[0].node->constant.value = arr_mem;
 						sched.done(node, host_stream, (void*)arr_mem);
-					} else if (node->type[0]->is_bufferlike_view()) {
-						for (size_t i = 1; i < node->construct.args.size(); i++) {
-							auto arg_ty = node->construct.args[i].type();
-							auto& parm = node->construct.args[i];
-
-							recorder.add_sync(sched.base_type(parm).get(), sched.get_dependency_info(parm, arg_ty.get(), RW::eWrite, nullptr), sched.get_value(parm));
-						}
-						auto p = sched.get_value<ptr<>>(node->construct.args[1]);
-						auto s = sched.get_value<size_t>(node->construct.args[2]);
-#ifdef VUK_DUMP_EXEC
-						print_results(node);
-						fmt::print(" = construct<view<b>> ");
-						print_args(node->construct.args.subspan(1));
-						fmt::print("\n");
-#endif
-						sched.done(node, host_stream, view<BufferLike<void>>{ p, s });
-						recorder.init_sync(node->type[0].get(), { to_use(eNone), host_stream }, sched.get_value(first(node)));
-					} else if (node->type[0]->hash_value == current_module->types.builtin_sampled_image) {
-						for (size_t i = 1; i < node->construct.args.size(); i++) {
-							auto arg_ty = node->construct.args[i].type();
-							auto& parm = node->construct.args[i];
-
-							recorder.add_sync(sched.base_type(parm).get(), sched.get_dependency_info(parm, arg_ty.get(), RW::eWrite, nullptr), sched.get_value(parm));
-						}
-						auto image = sched.get_value<ImageAttachment>(node->construct.args[1]);
-						auto samp = sched.get_value<SamplerCreateInfo>(node->construct.args[2]);
-#ifdef VUK_DUMP_EXEC
-						print_results(node);
-						fmt::print(" = construct<sampled_image> ");
-						print_args(node->construct.args.subspan(1));
-						fmt::print("\n");
-#endif
-						sched.done(node, host_stream, SampledImage{ image, samp });
 					} else {
-						assert(0);
+						for (size_t i = 1; i < node->construct.args.size(); i++) {
+							auto arg_ty = node->construct.args[i].type();
+							auto& parm = node->construct.args[i];
+
+							recorder.add_sync(sched.base_type(parm).get(), sched.get_dependency_info(parm, arg_ty.get(), RW::eWrite, nullptr), sched.get_value(parm));
+						}
+
+						auto result_ty = node->type[0].get();
+						// allocate type
+						void* result = new char[result_ty->size];
+						// loop args and resolve them
+						std::vector<void*> argvals;
+
+						auto res = [&]() -> Result<void, CannotBeConstantEvaluated> {
+							for (size_t i = 1; i < node->construct.args.size(); i++) {
+								auto& parm = node->construct.args[i];
+								if (parm.node->execution_info) {
+									argvals.push_back(sched.get_value(parm));
+									continue;
+								}
+								auto result = eval2(parm);
+								// the evaluation failed
+								if (!result) {
+									return result;
+								}
+								// the evaluation did not produce a value
+								if (result->is_ref) {
+									return { expected_error, CannotBeConstantEvaluated{ node->construct.args[i] } };
+								}
+								argvals.push_back(result->value);
+								if (result->owned) { // TODO: what is this?
+									delete[] reinterpret_cast<char*>(result->value);
+								};
+							}
+							return { expected_value };
+						}();
+						if (!res) {
+							if (res.error().ref.node->kind == Node::PLACEHOLDER) {
+								return { expected_error,
+									       RenderGraphException(format_message(Level::eError, node, node->construct.args, "': argument(s) not set or inferrable\n")) };
+							} else {
+								return { expected_error,
+									       RenderGraphException(format_message(Level::eError, node, node->construct.args, "': argument(s) not constant evaluatable\n")) };
+							}
+						}
+
+						result_ty->composite.construct(result, argvals);
+#ifdef VUK_DUMP_EXEC
+						print_results(node);
+						fmt::print(" = construct<{}> ", Type::to_string(result_ty));
+						print_args(node->construct.args.subspan(1));
+						fmt::print("\n");
+#endif
+						sched.done(node, host_stream, result);
+						recorder.init_sync(node->type[0].get(), { to_use(eNone), host_stream }, sched.get_value(first(node)), false); // TODO: can we figure out when it is safe known aliasing?
 					}
 				} else {
-					for (auto& parm : node->construct.args.subspan(1)) {
+					for (auto& parm : node->construct.args) {
 						sched.schedule_dependency(parm, RW::eRead);
 					}
 				}
 				break;
 			}
+
+			// we can allocate ptrs and generic views
+			// TODO: image ptrs and generic views
+			case Node::ALLOCATE: {
+				if (sched.process(item)) {
+					auto allocator = node->allocate.allocator ? *node->allocate.allocator : alloc;
+
+					assert(node->type[0]->kind == Type::POINTER_TY);
+					auto pointed_ty = *node->type[0]->pointer.T;
+
+					ptr_base buf;
+					auto bci = sched.get_value<BufferCreateInfo>(node->allocate.src);
+					if (auto res = allocator.allocate_memory(std::span{ static_cast<ptr_base*>(&buf), 1 }, std::span{ &bci, 1 }); !res) {
+						return res;
+					}
+
+#ifdef VUK_DUMP_EXEC
+					print_results(node);
+					fmt::print(" = allocate<{}> ", Type::to_string(node->type[0].get()));
+					print_args({ &node->allocate.src, 1 });
+					fmt::print("\n");
+#endif
+					sched.done(node, host_stream, buf);
+					recorder.init_sync(node->type[0].get(), { to_use(eNone), host_stream }, sched.get_value(first(node)));
+				} else {
+					sched.schedule_dependency(node->allocate.src, RW::eRead);
+				}
+
+				break;
+			}
+
 			case Node::CALL: {
 				auto fn_type = node->call.args[0].type();
 				size_t first_parm = fn_type->kind == Type::OPAQUE_FN_TY ? 1 : 4;
@@ -1380,7 +1395,8 @@ namespace vuk {
 							// here: figuring out which allocator to use to make image views for the RP and then making them
 							if (is_framebuffer_attachment(access)) {
 								auto urdef = get_def2(parm)->node;
-								auto allocator = urdef->kind == Node::CONSTRUCT && urdef->construct.allocator ? *urdef->construct.allocator : alloc;
+								// TODO: custom alloc support regression
+								auto allocator = alloc;
 								auto& img_att = sched.get_value<ImageAttachment>(parm);
 								if (img_att.view_type == ImageViewType::eInfer || img_att.view_type == ImageViewType::eCube) { // framebuffers need 2D or 2DArray views
 									if (img_att.layer_count > 1) {
@@ -1455,8 +1471,7 @@ namespace vuk {
 
 						void* rpass_profile_data = nullptr;
 						if (vk_rec->callbacks->on_begin_pass)
-							rpass_profile_data =
-							    vk_rec->callbacks->on_begin_pass(vk_rec->callbacks->user_data, fn_type->debug_info.name.c_str(), cobuf, vk_rec->domain);
+							rpass_profile_data = vk_rec->callbacks->on_begin_pass(vk_rec->callbacks->user_data, fn_type->debug_info.name.c_str(), cobuf, vk_rec->domain);
 
 						if (vk_rec->rp.rpci.attachments.size() > 0) {
 							vk_rec->prepare_render_pass();
@@ -1487,7 +1502,7 @@ namespace vuk {
 							case DescriptorType::eStorageBuffer: {
 								auto& v = *reinterpret_cast<view<BufferLike<void>>*>(val);
 								auto& ae = alloc.get_context().resolve_ptr(v.data());
-								Buffer buf{ nullptr, ae.buffer.buffer, ae.buffer.offset, v.size() };
+								Buffer buf{ nullptr, ae.buffer.buffer, ae.buffer.offset, v.size_bytes() };
 								cobuf.bind_buffer(set, binding->binding, buf);
 								break;
 							}
@@ -1684,16 +1699,11 @@ namespace vuk {
 							}
 							StreamResourceUse src_use = { acqrel->last_use[i], src_stream };
 							recorder.init_sync(node->type[i].get(), src_use, node->splice.values[i], false);
-							// TODO: clean this up
 #ifdef VUK_DUMP_EXEC
-							if (node->type[i]->hash_value == current_module->types.builtin_buffer) {
-								fmt::print("buffer");
-							} else if (node->type[i]->hash_value == current_module->types.builtin_image) {
-								fmt::print("image");
-							} else if (node->type[0]->kind == Type::ARRAY_TY) {
-								fmt::print("{}[]", (*node->type[0]->array.T)->hash_value == current_module->types.builtin_buffer ? "buffer" : "image");
-							} else if (node->type[i]->kind == Type::POINTER_TY) {
-								fmt::print("ptr");
+							if (node->type[0]->kind == Type::ARRAY_TY) {
+								fmt::print("{}[]", Type::to_string(node->type[0]->array.T->get()));
+							} else {
+								fmt::print("{}", Type::to_string(node->type[0].get()));
 							}
 							if (i + 1 < node->splice.values.size()) {
 								fmt::print(", ");
@@ -1875,7 +1885,7 @@ namespace vuk {
 					auto size = alloc.get_context().resolve_ptr(ptr).buffer.size;
 					sched.done(node, item.scheduled_stream, size); // converge doesn't execute
 				} else {
-					sched.schedule_dependency(node->get_allocation_size.ptr, RW::eRead);
+					sched.schedule_new(node->get_allocation_size.ptr.node);
 				}
 				break;
 			}
