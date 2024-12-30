@@ -853,11 +853,12 @@ namespace vuk {
 					return 0;
 				}
 			} else if (base_ty->kind == Type::POINTER_TY) {
-				return 0; // pointers cannot be synchronized
+				auto& v = *reinterpret_cast<ptr_base*>(value); // TODO: this should be with the implicit view and aliasing
+				key = v.device_address;
 			} else if (base_ty->is_bufferlike_view()) {
 				auto& v = *reinterpret_cast<view<BufferLike<void>>*>(value);
 				key = v.ptr.device_address;
-				hash_combine(key, v.sz_bytes); // TODO: aliasing
+				//hash_combine(key, v.sz_bytes); // TODO: aliasing
 			} else {                      // other types do not sync
 				return 0;
 			}
@@ -986,7 +987,7 @@ namespace vuk {
 					found->subrange.image.base_layer = isection.base_layer;
 					found->subrange.image.layer_count = isection.layer_count;
 				}
-			} else if (base_ty->hash_value == current_module->types.builtin_buffer) {
+			} else if (base_ty->kind == Type::POINTER_TY || base_ty->is_bufferlike_view()) {
 				auto& src_use = *head;
 				if (src_use.stream && dst_use.stream && (src_use.stream != dst_use.stream)) {
 					dst_use.stream->add_dependency(src_use.stream);
