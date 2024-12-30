@@ -558,7 +558,7 @@ namespace vuk {
 			if (ref.node->splice.rel_acq == nullptr || ref.node->splice.rel_acq->status == Signal::Status::eDisarmed || ref.node->splice.src.size() > ref.index) {
 				return get_def(ref.node->splice.src[ref.index]);
 			} else {
-				return { expected_value, RefOrValue::from_value(ref.node->splice.values[ref.index]) };
+				return { expected_value, RefOrValue::from_ref(ref) /*RefOrValue::from_value(ref.node->splice.values[ref.index])*/ };
 			}
 		}
 		case Node::CALL: {
@@ -1379,7 +1379,7 @@ namespace vuk {
 					unify_type(*t->imbued.T);
 				} else if (t->kind == Type::ARRAY_TY) {
 					unify_type(*t->array.T);
-				} else if (t->kind == Type::POINTER_TY){
+				} else if (t->kind == Type::POINTER_TY) {
 					unify_type(*t->pointer.T);
 				} else if (t->kind == Type::COMPOSITE_TY) {
 					for (auto& elem_ty : t->child_types) {
@@ -1406,8 +1406,10 @@ namespace vuk {
 				}
 			}
 
+			// TODO: PAV: this changes
 			void destroy(Type* t, void* v) {
-				if (t->hash_value == builtin_buffer) {
+				if (t->kind == Type::INTEGER_TY) {
+				} else if (t->hash_value == builtin_buffer) {
 					std::destroy_at<Buffer>((Buffer*)v);
 				} else if (t->hash_value == builtin_image) {
 					std::destroy_at<ImageAttachment>((ImageAttachment*)v);

@@ -45,6 +45,9 @@ namespace vuk {
 	};
 
 	template<class T>
+	struct erased_tuple_adaptor;
+
+	template<class T>
 	class Value : public UntypedValue {
 	public:
 		using UntypedValue::UntypedValue;
@@ -56,7 +59,9 @@ namespace vuk {
 			return *reinterpret_cast<Value<U>*>(this); // TODO: not cool
 		}
 
-		T* operator->() noexcept {
+		T* operator->() noexcept
+		  requires(!erased_tuple_adaptor<T>::value)
+		{
 			auto def_or_v = *get_def(get_head());
 			if (!def_or_v.is_ref) {
 				return static_cast<T*>(def_or_v.value);
@@ -65,12 +70,34 @@ namespace vuk {
 			return *eval<T*>(def);
 		}
 
+		auto operator->() noexcept
+		  requires(erased_tuple_adaptor<T>::value)
+		{
+			auto def_or_v = *get_def(get_head());
+			if (!def_or_v.is_ref) {
+				assert(false);
+				//return static_cast<T*>(def_or_v.value);
+			}
+			auto def = def_or_v.ref;
+			return std::apply(
+			    [def](auto... a) {
+				    size_t i = 0;
+				    return typename erased_tuple_adaptor<T>::proxy{ make_ext_ref(current_module->make_extract((a, def), i++))... };
+			    },
+			    erased_tuple_adaptor<T>::member_types);
+		}
+
 		/// @brief Wait and retrieve the result of the Value on the host
 		[[nodiscard]] Result<T> get(Allocator& allocator, Compiler& compiler, RenderGraphCompileOptions options = {})
 		  requires(!std::is_array_v<T>)
 		{
 			if (auto result = wait(allocator, compiler, options)) {
-				return { expected_value, *operator->() };
+				auto def_or_v = *get_def(get_head());
+				if (!def_or_v.is_ref) {
+					return { expected_value, *static_cast<T*>(def_or_v.value) };
+				} else {
+					return { expected_value, **eval<T*>(def_or_v.ref) };
+				}
 			} else {
 				return result;
 			}
@@ -283,6 +310,17 @@ namespace vuk {
 			return { make_ext_ref({ def.node->allocate.src }) };
 		}
 
+		template<class U = T>
+		void set(U value)
+		  requires(!std::is_same_v<T, void> && !erased_tuple_adaptor<T>::value)
+		{
+			auto def_or_v = *get_def(get_head());
+			if (!def_or_v.is_ref) {
+				*static_cast<T*>(def_or_v.value) = value;
+			}
+			auto def = def_or_v.ref;
+			**eval<T*>(def) = value;
+		}
 	};
 
 	template<class T = void, class... Ctrs>
