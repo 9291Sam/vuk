@@ -3,11 +3,12 @@
 #include "vuk/Config.hpp"
 #include "vuk/Exception.hpp"
 #include "vuk/FixedVector.hpp"
+#include "vuk/Result.hpp"
+#include "vuk/Types.hpp"
+#include "vuk/runtime/vk/Allocation.hpp"
 #include "vuk/runtime/vk/Image.hpp"
 #include "vuk/runtime/vk/PipelineInstance.hpp"
 #include "vuk/runtime/vk/Query.hpp"
-#include "vuk/Result.hpp"
-#include "vuk/Types.hpp"
 #include "vuk/vuk_fwd.hpp"
 
 #include <optional>
@@ -285,6 +286,7 @@ namespace vuk {
 		std::pair<VkDescriptorSet, VkDescriptorSetLayout> persistent_sets[VUK_MAX_SETS] = {};
 
 		CommandBuffer(Stream& stream, Runtime& ctx, Allocator& allocator, VkCommandBuffer cb, std::optional<RenderPassInfo> ongoing = {});
+
 	public:
 		/// @brief Retrieve parent runtime
 		Runtime& get_context() {
@@ -407,15 +409,22 @@ namespace vuk {
 		/// @param buffer The buffer to be bound
 		/// @param first_location First location assigned to the attributes
 		/// @param format_list List of formats packed in buffer to generate attributes from
-		CommandBuffer& bind_vertex_buffer(unsigned binding, const Buffer& buffer, unsigned first_location, Packed format_list, VertexInputRate input_rate = VertexInputRate::eVertex);
+		CommandBuffer& bind_vertex_buffer(unsigned binding,
+		                                  const Buffer& buffer,
+		                                  unsigned first_location,
+		                                  Packed format_list,
+		                                  VertexInputRate input_rate = VertexInputRate::eVertex);
 		/// @brief Binds a vertex buffer to the given binding point and configures attributes sourced from this buffer based on a span of attribute descriptions and
 		/// stride
 		/// @param binding The binding point of the buffer
 		/// @param buffer The buffer to be bound
 		/// @param attribute_descriptions Attributes that are sourced from this buffer
 		/// @param stride Stride of a vertex sourced from this buffer
-		CommandBuffer&
-		bind_vertex_buffer(unsigned binding, const Buffer& buffer, std::span<VertexInputAttributeDescription> attribute_descriptions, uint32_t stride, VertexInputRate input_rate = VertexInputRate::eVertex);
+		CommandBuffer& bind_vertex_buffer(unsigned binding,
+		                                  const Buffer& buffer,
+		                                  std::span<VertexInputAttributeDescription> attribute_descriptions,
+		                                  uint32_t stride,
+		                                  VertexInputRate input_rate = VertexInputRate::eVertex);
 
 		/// @brief Update push constants for the specified stages with bytes
 		/// @param stages Pipeline stages that can see the updated bytes
@@ -650,7 +659,7 @@ namespace vuk {
 		/// @brief Fill a buffer with a fixed value
 		/// @param dst the destination Buffer
 		/// @param data the 4 byte value to fill with
-		CommandBuffer& fill_buffer(const Buffer& dst, uint32_t data);
+		CommandBuffer& fill_buffer(const view<BufferLike<byte>>& dst, uint32_t data);
 		/// @brief Fill a buffer with a host values
 		/// @param dst the destination Buffer
 		/// @param data pointer to host values
