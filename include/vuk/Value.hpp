@@ -173,11 +173,11 @@ namespace vuk {
 
 		// Buffer inferences
 
-		void same_size(const Value<Buffer>& src)
-		  requires std::is_same_v<T, Buffer>
+		void same_size(const Value<T>& src)
+		  requires is_bufferlike_view<T>
 		{
 			node->deps.push_back(src.node);
-			replace_arg_with_extract_or_constant(get_head(), src.get_head(), 0);
+			replace_arg_with_extract_or_constant(get_head(), src.get_head(), 1);
 		}
 
 		Value<uint64_t> get_size_bytes()
@@ -292,7 +292,7 @@ namespace vuk {
 		auto implicit_view()
 		  requires std::is_base_of_v<ptr_base, T>
 		{
-			using inner_T = T::pointed_T;
+			using inner_T = typename std::remove_extent_t<typename T::pointed_T>;
 			std::array args = { get_head(), current_module->make_get_allocation_size(get_head()) };
 			auto imp_view = current_module->make_construct(to_IR_type<view<inner_T>>(), nullptr, args);
 			auto vval = Value<view<inner_T>>{ make_ext_ref(imp_view, { node }) };

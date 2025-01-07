@@ -60,9 +60,6 @@ namespace vuk {
 		virtual Result<void, AllocateException> allocate_memory_views(std::span<generic_view_base> dst, std::span<const BVCI> cis, SourceLocationAtFrame loc) = 0;
 		virtual void deallocate_memory_views(std::span<const generic_view_base> dst) = 0;
 
-		virtual Result<void, AllocateException> allocate_buffers(std::span<Buffer> dst, std::span<const BufferCreateInfo> cis, SourceLocationAtFrame loc) = 0;
-		virtual void deallocate_buffers(std::span<const Buffer> dst) = 0;
-
 		virtual Result<void, AllocateException>
 		allocate_framebuffers(std::span<VkFramebuffer> dst, std::span<const FramebufferCreateInfo> cis, SourceLocationAtFrame loc) = 0;
 		virtual void deallocate_framebuffers(std::span<const VkFramebuffer> dst) = 0;
@@ -244,25 +241,6 @@ namespace vuk {
 		/// @brief Deallocate buffers previously allocated from this Allocator
 		/// @param src Span of buffers to be deallocated
 		void deallocate(std::span<const generic_view_base> src);
-
-		/// @brief Allocate buffers from this Allocator
-		/// @param dst Destination span to place allocated buffers into
-		/// @param cis Per-element construction info
-		/// @param loc Source location information
-		/// @return Result<void, AllocateException> : void or AllocateException if the allocation could not be performed.
-		Result<void, AllocateException> allocate(std::span<Buffer> dst, std::span<const BufferCreateInfo> cis, SourceLocationAtFrame loc = VUK_HERE_AND_NOW());
-
-		/// @brief Allocate buffers from this Allocator
-		/// @param dst Destination span to place allocated buffers into
-		/// @param cis Per-element construction info
-		/// @param loc Source location information
-		/// @return Result<void, AllocateException> : void or AllocateException if the allocation could not be performed.
-		Result<void, AllocateException>
-		allocate_buffers(std::span<Buffer> dst, std::span<const BufferCreateInfo> cis, SourceLocationAtFrame loc = VUK_HERE_AND_NOW());
-
-		/// @brief Deallocate buffers previously allocated from this Allocator
-		/// @param src Span of buffers to be deallocated
-		void deallocate(std::span<const Buffer> src);
 
 		/// @brief Allocate framebuffers from this Allocator
 		/// @param dst Destination span to place allocated framebuffers into

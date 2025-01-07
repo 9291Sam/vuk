@@ -423,7 +423,7 @@ namespace vuk {
 				// attempt to find the final revision of this
 				// this could be either the last write on the main chain, or the last write on a child chain
 				auto last_write = walk_writes(see_through_splice ? parm.node->splice.src[parm.index] : parm, requested);
-				// 
+				//
 				if (last_write.type() != parm.type()) {
 					auto lr_ty = Type::stripped(last_write.type());
 					VUK_ICE(lr_ty->kind == Type::COMPOSITE_TY);
@@ -763,10 +763,10 @@ namespace vuk {
 
 		// construct reification - if there were later setting of fields, then remove placeholders
 		for (auto node : nodes) {
+			auto ty = node->type[0];
 			switch (node->kind) {
 			case Node::CONSTRUCT: {
 				auto args_ptr = node->construct.args.data();
-				auto ty = node->type[0];
 				if (ty->hash_value == current_module->types.builtin_image) {
 					auto ptr = &constant<ImageAttachment>(args_ptr[0]);
 					auto& value = constant<ImageAttachment>(args_ptr[0]);
@@ -799,6 +799,13 @@ namespace vuk {
 					}
 				} else if (ty->kind == Type::COMPOSITE_TY) {
 					auto* base = constant(args_ptr[0]);
+					if (ty->is_bufferlike_view() &&
+					    node->construct.args[2].node->kind != Node::PLACEHOLDER) { // if we are constructing a view, and the view has known size
+						auto def = get_def2(node->construct.args[1]);
+						if (def && def->node->kind == Node::CONSTRUCT && def->node->construct.args[2].node->kind == Node::PLACEHOLDER) {
+							def->node->construct.args[2] = node->construct.args[2];
+						}
+					}
 					if (!base) { // if there was no value provided here, then we don't perform any reification
 						break;
 					}
@@ -1180,7 +1187,7 @@ namespace vuk {
 	Result<void> Compiler::validate_read_undefined() {
 		for (auto node : impl->nodes) {
 			switch (node->kind) {
-			case Node::ALLOCATE: { // ALLOCATE discards
+			case Node::ALLOCATE: {                 // ALLOCATE discards
 				if (node->links->reads.size() > 0) { // we are trying to read from it :(
 					auto reads = node->links->reads.to_span(impl->pass_reads);
 					for (auto offender : reads) {
@@ -1235,11 +1242,22 @@ namespace vuk {
 	}
 
 	Result<void> Compiler::validate_duplicated_resource_ref() {
-		std::unordered_set<Buffer> bufs;
+		RadixTree<bool> memory;
 		std::unordered_set<ImageAttachment> ias;
 		std::unordered_set<Swapchain*> swps;
 		for (auto node : impl->nodes) {
 			switch (node->kind) {
+			case Node::CONSTANT: {
+				bool s = true;
+				if (node->type[0]->kind == Type::POINTER_TY) { // pointers - use implicit view
+					auto& ptr = constant<ptr_base>(first(node));
+					auto& ae = Resolver::per_thread->resolve_ptr(ptr);
+					s = memory.insert_unaligned(ptr.device_address, ae.buffer.size, true);
+				} else if (node->type[0]->is_bufferlike_view()) { // bufferlike views
+					auto& buf = constant<Buffer<>>(first(node));
+					s = memory.insert_unaligned(buf.ptr.device_address, buf.sz_bytes, true);
+				}
+			} break;
 			case Node::CONSTRUCT: {
 				bool s = true;
 				if (node->type[0]->hash_value == current_module->types.builtin_image) {
@@ -1248,12 +1266,13 @@ namespace vuk {
 						auto [_, succ] = ias.emplace(*ia);
 						s = succ;
 					}
-				} else if (node->type[0]->hash_value == current_module->types.builtin_buffer) {
-					auto buf = reinterpret_cast<Buffer*>(node->construct.args[0].node->constant.value);
-					if (buf->buffer != VK_NULL_HANDLE) {
-						auto [_, succ] = bufs.emplace(*buf);
-						s = succ;
+				} else if (node->type[0]->is_bufferlike_view()) { // bufferlike views
+					auto buf = eval<Buffer<>>(first(node));
+					if (!buf) { // cannot be constant evaluated -> we are going to allocate it, therefore it can't alias
+						(void)buf.error();
+						break;
 					}
+					s = memory.insert_unaligned(buf->ptr.device_address, buf->sz_bytes, true);
 				} else if (node->type[0]->hash_value == current_module->types.builtin_swapchain) {
 					auto [_, succ] = swps.emplace(reinterpret_cast<Swapchain*>(node->construct.args[0].node->constant.value));
 					s = succ;
@@ -1278,9 +1297,13 @@ namespace vuk {
 					if (node->type[i]->hash_value == current_module->types.builtin_image) {
 						auto [_, succ] = ias.emplace(*reinterpret_cast<ImageAttachment*>(node->splice.values[i]));
 						s = succ;
-					} else if (node->type[i]->hash_value == current_module->types.builtin_buffer) {
-						auto [_, succ] = bufs.emplace(*reinterpret_cast<Buffer*>(node->splice.values[i]));
-						s = succ;
+					} else if (node->type[0]->is_bufferlike_view()) { // bufferlike views
+						auto buf = eval<Buffer<>>(first(node));
+						if (!buf) { // cannot be constant evaluated -> we are going to allocate it, therefore it can't alias
+							(void)buf.error();
+							break;
+						}
+						s = memory.insert_unaligned(buf->ptr.device_address, buf->sz_bytes, true);
 					} else if (node->type[i]->hash_value == current_module->types.builtin_swapchain) {
 						auto [_, succ] = swps.emplace(reinterpret_cast<Swapchain*>(node->splice.values[i]));
 						s = succ;
@@ -1625,11 +1648,12 @@ namespace vuk {
 		GraphDumper::end_graph();
 		//_dump_graph(impl->nodes, false, false);
 
+		VUK_DO_OR_RETURN(impl->reify_inference());
+
 		VUK_DO_OR_RETURN(validate_read_undefined());
 		VUK_DO_OR_RETURN(validate_duplicated_resource_ref());
 
 		VUK_DO_OR_RETURN(impl->collect_chains());
-		VUK_DO_OR_RETURN(impl->reify_inference());
 
 		for (auto& node : impl->ref_nodes) {
 			ScheduledItem item{ .execable = node, .scheduled_domain = vuk::DomainFlagBits::eAny };
